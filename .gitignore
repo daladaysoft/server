@@ -1,2 +1,11 @@
+<<<<<<< HEAD
 /war/
 /save/
+=======
+$ cat .gitignore
+    # exclude everything except directory WhpServer1/src
+    /*
+    !/WhpServer1
+    /WhpServer1/*
+    !/WhpServer1/src
+>>>>>>> branch 'master' of https://github.com/daladaysoft/server.git
