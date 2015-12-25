@@ -1,0 +1,137 @@
+package whp.gae;
+
+import java.util.Date;
+
+import whp.tls.Context;
+import whp.util.Misc;
+
+import com.google.appengine.api.datastore.DatastoreService;
+import com.google.appengine.api.datastore.DatastoreServiceFactory;
+import com.google.appengine.api.datastore.Entity;
+import com.google.appengine.api.datastore.EntityNotFoundException;
+import com.google.appengine.api.datastore.Key;
+import com.google.appengine.api.datastore.KeyFactory;
+import com.google.appengine.api.datastore.Transaction;
+
+/** Atomic services in GAE env.
+ * Stored in entity kind "A", with a key by counter (date or long).
+ * Always use the property name "a".
+ */
+public class DLAtom {
+	
+	public static final long SHARDED_INTERVAL = 500;
+	
+	/**
+	 * Each getDateUnique compute and return the last unique date that is ALWAYS
+	 * greater for 500 (ms) than the previous returned date in the same kind, comprised any
+	 * number of concurrent calls by different JVMs. This allows a "sharded" add of new 
+	 * (max SHARDED_INTERVAL) events that can sort itself within the returned date, in order 
+	 * to maintain a strict sort (events are published in the strictly same order than received).
+	 * 
+	 * In the future, the date unique should be managed by domain (not for all WHP), this will
+	 * reduce contention and advance in time in case of multiple add at the same time.
+	 * 
+	 * getDateUnique use a datastore transaction on this date. Thus, be careful, a
+	 * getDateUnique take around 100ms.
+	 * 
+	 * @param kind
+	 *            (string) is usually the simple class name. Typical example: <br>
+	 *            upd = DLAtom.getDateUnique( this.getClass().getSimpleName() );
+	 * @return Null if fail to get committed unique last date, else return
+	 *         unique date (as long) that is ALWAYS greater than previous and guarantees 500
+	 *         "free" milliseconds from the returned date. <br>
+	 */
+	
+	// synchronized can help the datastore transaction to avoid contention
+	// if more than one thread is working on the same kind in the same JVM	Answer answer = answer();
+	public synchronized static long getDateUnique( Context context ) {
+		
+		long jvmTime = System.currentTimeMillis();
+		long begTime = jvmTime;
+		
+		DatastoreService ds = DatastoreServiceFactory.getDatastoreService();
+		Key key = KeyFactory.createKey( "A", "ud" );
+		Transaction dst = ds.beginTransaction();
+		
+		
+//		Transaction dst1 = ds.beginTransaction();
+//		Transaction dst2 = ds.beginTransaction();
+//		Transaction dst3 = ds.beginTransaction();
+		
+		try {
+			// get kind "A", key "ud", prop "d" if exist
+			Entity gaeEntity = null;
+			try { gaeEntity = ds.get( dst, key ); }
+			catch( EntityNotFoundException e ) {}
+			
+			// verify if last GAE date is < current JVM date
+			if( gaeEntity == null ) gaeEntity = new Entity( key );
+			else {
+				long gaeLastTime = (Long) gaeEntity.getProperty("a");
+				if( gaeLastTime >= jvmTime )
+					jvmTime = gaeLastTime + 1;
+			}
+			
+			// add 500 ms to next time use (reserve 500 VO added at the same time)
+			jvmTime += SHARDED_INTERVAL; 
+						
+			// store new last date that is ALWAYS greater than previous
+			gaeEntity.setUnindexedProperty( "a", jvmTime );
+			ds.put( dst, gaeEntity );
+			dst.commit();
+			context.addLog( "commit: " + Misc.getDateFormatHMSS().format( new Date( jvmTime ) ), begTime );
+		} catch( Error e) { 
+			dst.rollback();
+			context.addLog( "FAILED and rollback: " + e, begTime );
+		}
+		
+		
+//		dst1.commit();
+//		dst2.commit();
+//		dst3.commit();
+		
+		return jvmTime;
+//		return new Date( jvmTime );
+	}
+	
+	// synchronized can help the datastore transaction to avoid contention
+	// if more than one thread is working on the same kind in the same JVM
+	// not used and probably a bad idea: see long id from gae datastore
+//	public synchronized static long getUUID() {
+//		
+//		long startTime = System.nanoTime();
+//		long uuid = 0;
+//		
+//		DatastoreService ds = DatastoreServiceFactory.getDatastoreService();
+//		Key key = KeyFactory.createKey( "A" , "uuid" );
+//		Transaction dst = ds.beginTransaction();
+//		
+//		try {
+//			// get kind "A", key "uuid", prop "d" if exist
+//			Entity gaeEntity = null;
+//			try { gaeEntity = ds.get( key ); }
+//			catch( EntityNotFoundException e ) {}
+//			
+//			// create if not found
+//			if( gaeEntity == null )
+//				gaeEntity = new Entity( key );
+//			else
+//				uuid = (Long) gaeEntity.getProperty("a");
+//			
+//			// increment uuid (= first is 1, GAE long key do not allows 0)
+//			uuid++;
+//			
+//			// store new uuid
+//			gaeEntity.setUnindexedProperty( "a", uuid );
+//			ds.put( gaeEntity );
+//			dst.commit();
+//
+//		} catch( Error e) { 
+//			dst.rollback();
+//			TLSAnswer.addLog( "FAILED and rollback: " + e 
+//					+ " in " + ((System.nanoTime() - startTime) / 1000000) + "ms" );
+//		}
+//		
+//		return uuid;
+//	}
+}

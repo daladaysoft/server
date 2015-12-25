@@ -1,0 +1,124 @@
+package whp.gae;
+
+import whp.util.Misc;
+
+/** RLE: Run Time Last Error static. Lightweight error manager (no properties, only
+ * static) used by VO and Tables to store the reason of an error.
+ * Can be used as inherited class.
+ * <p> Usage: if null (or false) is received, the caller can 
+ * check rleClass, rleType, rleMsg or rleMsgFull to see if an msg is available.
+ * These values are null if no message available. Warning: the rle values are static, 
+ * and reflect only the last order (a new order erase previous rle). Use rleReset 
+ * before set an error. </p> */
+public class RLE 
+{
+	// ===== statics
+	
+	// libs: rle addresses MUST be sequential without hole
+	// these codes must be synchronized with AS client.
+	private static String[] RLELIBS; 
+	
+	// base return code errors
+	public static final int OK 				= 0;
+	public static final int OK_ASYNC 		= 1;
+	public static final int ERR_NULLVALUE	= 2;
+	public static final int ERR_NOTFOUND	= 3;
+	public static final int ERR_DUPNAME 	= 4;
+	public static final int ERR_DUPID 		= 5;
+	public static final int ERR_INCONSISTENT= 6;
+	public static final int ERR_NOTINTABLE	= 7;
+	public static final int ERR_HASCHILD	= 8;
+	public static final int ERR_NOTDELREADY	= 9;
+	public static final int ERR_BADTYPE		= 10;
+	public static final int ERR_OUTPATH		= 11;
+	public static final int ERR_LOGIN		= 12;
+	public static final int ERR_PENDING		= 13;
+	public static final int ERR_SESSION		= 14;
+	public static final int ERR_REFUSED		= 15;
+	public static final int ERR_EXIST		= 16;
+	public static final int ERR_NOTEXIST	= 17;
+	public static final int ERR_SHARDEDOVER	= 18;
+	public static final int ERR_NOTVALID	= 19;
+	public static final int ERR_DBCONFLICT	= 20;
+	public static final int ERR_EXECERROR	= 21;
+	public static final int ERR_TIMEOUT		= 22;
+	public static final int ERR_RPCFAULT	= 23;
+	public static final int ERR_ROLENA		= 24;
+	public static final int ERR_NOTLOADED	= 25;
+	public static final int ERR_PKEY		= 26;
+	
+	// base return code info
+	public static final int INF_NOTLOGGED	= 27;
+	public static final int INF_NETDOWN		= 28;
+	public static final int INF_MUTEX		= 29;
+		
+	private static final int RLEMax			= 30;	// last ERR + 1
+	
+	@SuppressWarnings("rawtypes")
+	private static Class _class = null;
+	private static int _type = 0;
+	private static StringBuilder _msg = new StringBuilder();
+	
+	
+	// init rlelibs once if null
+	public RLE() {
+		if( RLELIBS == null ) {
+			RLELIBS 					= new String[ RLEMax ];
+			RLELIBS[ OK ] 				= "ok";
+			RLELIBS[ OK_ASYNC ]			= "okAsyncLaunched";
+			RLELIBS[ ERR_NULLVALUE ] 	= "nullValue";
+			RLELIBS[ ERR_NOTFOUND ] 	= "notFound";
+			RLELIBS[ ERR_DUPNAME ] 		= "dupName";
+			RLELIBS[ ERR_DUPID ] 		= "dupId";
+			RLELIBS[ ERR_INCONSISTENT ]	= "notConsistent";
+			RLELIBS[ ERR_NOTINTABLE ] 	= "notInTable";
+			RLELIBS[ ERR_HASCHILD ] 	= "hasChild";
+			RLELIBS[ ERR_NOTDELREADY ] 	= "notReady";
+			RLELIBS[ ERR_BADTYPE ] 		= "badType";
+			RLELIBS[ ERR_OUTPATH ] 		= "outPath";
+			RLELIBS[ ERR_LOGIN ] 		= "login";
+			RLELIBS[ ERR_PENDING ] 		= "pending";
+			RLELIBS[ ERR_SESSION ] 		= "session";
+			RLELIBS[ ERR_REFUSED ] 		= "refused";
+			RLELIBS[ ERR_EXIST ] 		= "exist";
+			RLELIBS[ ERR_NOTEXIST ] 	= "notExist";
+			RLELIBS[ ERR_SHARDEDOVER ] 	= "shardedOverflow";
+			RLELIBS[ ERR_NOTVALID ] 	= "notValid";
+			RLELIBS[ ERR_DBCONFLICT ] 	= "dbConflict";
+			RLELIBS[ ERR_EXECERROR ] 	= "execError";
+			RLELIBS[ ERR_TIMEOUT ] 		= "timeout";
+			RLELIBS[ ERR_RPCFAULT ] 	= "rpcReturnFault";
+			RLELIBS[ ERR_RPCFAULT ] 	= "rpcReturnFault";
+			RLELIBS[ ERR_ROLENA ] 		= "roleNotAllowed";
+			RLELIBS[ ERR_NOTLOADED ] 	= "notLoaded";
+			RLELIBS[ ERR_PKEY ] 		= "primaryKey";
+			
+			RLELIBS[ INF_NOTLOGGED ] 	= "notLogged";
+			RLELIBS[ INF_NETDOWN ] 		= "networkDown";
+			RLELIBS[ INF_MUTEX ] 		= "mutexRefused";
+		}
+	}
+	
+	//TODO: add function name as parameter of rleReset and prefix message with it
+	protected void rleReset() { _class = null; }
+	
+	protected Object rleSet( int type, String msg ) {
+		
+		if( _class == null ) _msg.setLength( 0 );			// if previous err, concat in msg
+		_msg.append( "[OVERLAP ERROR: " + rleMsgFull() +  "]" );
+		
+		_class = this.getClass();	// get inherited class
+		_type = type;				// typed message
+		
+		return null;
+	}
+	
+	public String 	rleClass() 		{ return( _class != null ) ? Misc.getSimpleClassName( _class ) : null; }
+	public int 		rleType() 		{ return( _class != null ) ? _type : 0; }
+	public String 	rleTypeLib() 	{ return( _class != null ) ? RLELIBS[ _type ] : null; }
+	public String 	rleMsg() 		{ return( _class != null ) ? _msg.toString() : null; }
+	
+	/** Return formated message: "Class: message (type)" or null if no message. */
+	public String 	rleMsgFull()	{ return( _class != null ) ? Misc.getSimpleClassName( _class ) + ": " + _msg.toString() + " (" + rleTypeLib() + ")" : null; }
+	
+}

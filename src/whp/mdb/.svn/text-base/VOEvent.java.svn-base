@@ -1,0 +1,394 @@
+package whp.mdb;
+
+import java.io.ByteArrayInputStream;
+import java.io.Externalizable;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+import java.util.Date;
+
+import org.granite.messaging.amf.io.AMF3Deserializer;
+
+import whp.gae.RLE;
+import whp.tls.Context;
+import whp.util.Misc;
+
+import com.google.appengine.api.datastore.Blob;
+import com.google.appengine.api.datastore.DatastoreService;
+import com.google.appengine.api.datastore.DatastoreServiceFactory;
+import com.google.appengine.api.datastore.Entity;
+import com.google.appengine.api.datastore.Key;
+import com.google.appengine.api.datastore.KeyFactory;
+
+/** VOEvent, do not extends VOFullBase.
+ * An event has no table: any reference to tableId refers to the contained VO tableId. 
+ * Also, this id is the VOEvent id, only voId refers to the contained VO id. 
+ * The domainId is the same to the event and the contained VO. */
+public class VOEvent extends RLE implements Externalizable
+{
+	// ===== constants & static variable
+	
+	private static final long serialVersionUID = 1L;
+	
+	public static final int INSERT = 1;
+	public static final int UPDATE = 2;
+	public static final int DELETE = 3;
+	public static final int MOVETT = 4;
+	
+	// max must be equal to the largest type
+	public static final int MAX = 4;
+	
+	// transport byte
+	public static final int TRANSPORT_VOFULL = 0;
+	public static final int TRANSPORT_EMPTY = 1;
+	public static final int TRANSPORT_NEXTID = 2;
+	
+	// ===== serialized variable
+	
+	public	double	 		version;
+	
+	/** Can be VOKey (temporary store domainId, voId, voTableId) if GAE Entity not exists,
+	 * that is the case when the VO is just unserialized, else voEntity is Entity, that
+	 * contains (domainId, voId, voTableId) in its Key.
+	 * Getters for domainId, voId, voTableId manage these situations. */
+	private Object			voEntity;
+	
+	public	Date 			upd;				// as event do not inherit VOPersistFullBase
+	
+	/** Types supported: 
+	 * <li> INSERT transport the full VO inserted. </li>
+	 * <li> UPDATE transport the full VO updated (not optimized), can be deployed as INSERT. </li>
+	 * <li> DELETE transport the full VO before delete (allows easy undo). </li>
+	 * <li> MOVETT transport only the new table id (_voClone is null). </li> */
+	public	long			type;				// insert, update, delete (serialized as byte), movett (to table)
+	public	long			storage;			// see VODomain.STORAGE: MEMORY, LOCAL, REMOTE
+	public	String			userId;				// userId that create the event (for information only for now)
+	public	String			voId;				// voClone.id (avoid deserialize to get it)
+	public	long			transport;			// describe serialization format
+	public	byte[]			voClone;			// clone of a new VO
+//	public	String			propValuesArray;	// updated properties
+	
+	// ===== transient variables
+	
+	/** null (not checked), String (error message on instantiation), or Object instanced (if available) */
+	private Object			voCloneInstance;	// cache to voClone instance (loaded by getVoCloneInstance)
+	
+	// ===== constructor
+	
+	/** Default constructor, without entity. Set voEntity with temporary key VOKey. */
+	public VOEvent() { 
+		voEntity = new VOKey(); 
+	}	
+	
+	/** The GAE Entity is know. Set voEntity as Entity (avoid instantiation of temporary key storage). */
+	public VOEvent( Entity gaeEntity ) {
+		voEntity = gaeEntity;
+	}
+	
+	// ===== storage related properties
+	
+	/** Return domainId if loaded, else null. 
+	 * Use as GAE Key ancestor if not root (D0.0). */
+	public String getDomainId() { 
+		if( voEntity instanceof VOKey ) return ((VOKey) voEntity).domainId;
+		if( voEntity instanceof Entity ) {
+			Key parentKey = ((Entity) voEntity).getKey().getParent();
+			if( parentKey != null ) return parentKey.getName();
+			else return "D0.0";	// only root domain D0.0 has no ancestor key
+		}
+		return null;
+	}
+	
+	/** Set domainId, return domainId if was not already set, else 
+	 * return null (domainId is write-once, cannot be changed). */
+	public String setDomainId( String domainId ) {
+		if( voEntity instanceof VOKey && ((VOKey) voEntity).domainId == null ) {
+			((VOKey) voEntity).domainId = domainId;
+			return domainId;
+		}
+		return null;
+	}
+	
+	/** Events can be stored in root domain. */
+	public boolean isDomainRootAllowed() { return true; }
+	
+	/** Return tableId if loaded, else null.
+	 * keyName is (tableId + "_" + eventId) */
+	public String getTableId() { 
+		if( voEntity instanceof VOKey ) return ((VOKey) voEntity).tableId;
+		if( voEntity instanceof Entity ) {
+			String keyName = ((Entity) voEntity).getKey().getName();
+			int index = keyName.lastIndexOf( "_" );
+			return keyName.substring( 0, index - 1 ); 
+		}
+		return null;
+	}
+	
+	/** Set tableId, return tableId if was not already set, else 
+	 * return null (tableId is write-once, cannot be changed). */
+	public final String setTableId( String tableId ) {
+		if( voEntity instanceof VOKey && ((VOKey) voEntity).tableId == null ) {
+			((VOKey) voEntity).tableId = tableId;
+			return tableId;
+		}
+		return null;
+	}
+	
+	/** Return eventId if loaded, else null.
+	 * keyName is (tableId + "_" + eventId) */
+	public String getEventId() { 
+		if( voEntity instanceof VOKey ) return ((VOKey) voEntity).id;
+		if( voEntity instanceof Entity ) {
+			String keyName = ((Entity) voEntity).getKey().getName();
+			int index = keyName.lastIndexOf( "_" );
+			return keyName.substring( index + 1 ); 
+		}
+		return null;
+	}
+	
+	/** Set eventId, return eventId if was not already set, else 
+	 * return null (eventId is write-once, cannot be changed). */
+	public final String setEventId( String eventId ) {
+		if( voEntity instanceof VOKey && ((VOKey) voEntity).id == null ) {
+			((VOKey) voEntity).id = eventId;
+			return eventId;
+		}
+		return null;
+	}
+	
+	/** Return null if isConsistent, else return a message. */
+	public String isConsistent() {
+		if( getDomainId() == null ) return "domainId is null (see setDomainId)";
+		if( getEventId() == null ) return "eventId is null";
+		if( getTableId() == null ) return "tableId is null";
+		return null;
+	}
+	
+	// ===== specific this VO methods
+	
+	/** Extract the bid from eventId, without prefix M (dedicated to VOMdb,
+	 * match exactly the context.bid that does not contains this prefix).
+	 * <i> Could be optimized by storing the bid in GAE entity, not done for now. 
+	 * Could also be more clear if was named bidShort, or bidNum (something
+	 * to help to keep in memory that the prefix M is missing). </i> */
+	public String getBid() {
+		String str = getEventId();
+		int iMax = str.length();
+		int i = 0;
+		while( i < iMax ) if( str.charAt( i++ ) == '.' ) break;
+		if( i < iMax && i > 1 ) return str.substring( 2, i - 1 );
+		return str;
+	}
+	
+	public String getTypeString() {
+		if( type == INSERT ) return "insert";
+		if( type == UPDATE ) return "update";
+		if( type == DELETE ) return "delete";
+		if( type == MOVETT ) return "movett";
+		return "undefined";
+	}
+	
+	public Object getVoCloneInstance() {
+		
+		if( voCloneInstance != null ) return voCloneInstance;
+		if( transport != TRANSPORT_VOFULL ) return null;
+//		if( voClone == null ) return null;
+		
+		/** note: it is possible to deserialize an unknown class ... if we do not use 
+		 * readObject method. But in counterpart, we must know what are the fields. With 
+		 * this approach, it's becomes possible to reduce the amount of bytes transferred.*/
+		
+		// read AS ByteArray (event.voClone)
+		InputStream inStram = new ByteArrayInputStream( voClone );
+		AMF3Deserializer in = new AMF3Deserializer( inStram );
+		try { voCloneInstance = in.readObject(); } 
+		catch ( IOException e ) {
+			if( e.getCause() == null ) voCloneInstance = e.toString();
+			else voCloneInstance = e.getCause().getMessage();
+		}
+		
+		return voCloneInstance;
+	}
+	
+	public String getVoCloneInfo() {
+		getVoCloneInstance();
+		
+		if( voCloneInstance == null ) return "<null>";
+		if( voCloneInstance instanceof String ) return (String) voCloneInstance;
+		
+		String info;
+		if( voCloneInstance instanceof VOBaseFull ) {
+			info = ((VOBaseFull ) voCloneInstance).name + " " + ((VOBaseFull ) voCloneInstance).getIdd();
+		} else {
+			info = "UNKNOW CLASS"; 
+		}
+		info += " " + Misc.getSimpleClassName( voCloneInstance );
+		return info;
+	}
+	
+	// ===== standard GAE Entities management
+	
+	// ----- store, unstore
+	
+	/** Store GAE Entity (create a new or reuse previous). Warning, the domainId MUST 
+	 * be set (setDomainId) before store can be used if the event is a new inserted event, 
+	 * else store will throw VOStoreException. The ds.put() maintains accurate the Key of
+	 * the Entity. 
+	 * Need the context (to set the updDate with date increment). */
+	public void store( Context context ) throws VOStoreException {
+		
+		// check isConsistent before attempt to store the VO
+		if( isConsistent() != null ) throw new VOStoreException( isConsistent() );
+		
+		// store GAE entity
+		DatastoreService ds = DatastoreServiceFactory.getDatastoreService();
+		ds.put( writeEntity( context ) );
+	}
+	
+	/** An event can never be deleted ? */
+	public void unstore() throws VOStoreException {}
+	
+	// ----- get a valid GAE Entity
+	
+	/** Create a new GAE entity if not already acquired (and store it in voEntity),
+	 * else reuse voEntity. Manage event GAE Key construction rules here.
+	 * @throws VOStoreException */
+	private Entity getEntity() throws VOStoreException {
+		
+		// if voEntity is already an Entity return it
+		if( voEntity instanceof Entity ) return (Entity) voEntity;
+		
+		// if not VOKey and not Entity (for debug)
+		if( ! ( voEntity instanceof VOKey ) ) throw new VOStoreException( "event voEntity not VOKey nor Entity" );
+		
+		// create Entity from temporary (domainId, voId, voTableId) stored in VOKey
+		VOKey voKey = (VOKey) voEntity;
+		
+		// event key name is always tableId + "_" + eventId
+		String eventKeyName = voKey.tableId + "_" + voKey.id;
+		
+		// create GAE Key
+		
+		if( voKey.domainId.equals( "D0.0" ) ) {
+			// there is no ancestor nor transactions in domain root
+			voEntity = new Entity( "e", eventKeyName );
+		} else {
+			// else events have their domain as root entity and transactions are possible
+			Key parentKey = KeyFactory.createKey( "D", voKey.domainId );
+			voEntity = new Entity( "e", eventKeyName, parentKey );
+		}
+
+		return (Entity) voEntity;
+	}
+	
+	/** Read GAE Entity, unserialize it and return a new instanced VO. */
+	public static VOEvent readEntity( Entity gaeEntity ) {
+		VOEvent event = new VOEvent( gaeEntity );
+		event.readEntityBase();
+		return event;
+	}
+	
+	// ----- GAE Key services
+	
+	/** VOEvent kind. */
+	public static String getGaeKind() {
+		return "e";
+	}
+	
+	// ===== serialize GAE Entity
+	
+	protected Entity readEntityBase() {
+		
+		Entity gaeEntity 	= (Entity) voEntity;
+		
+		version 			= (Double) gaeEntity.getProperty( "v" );
+		upd 				= (Date) gaeEntity.getProperty( "upd" );
+		
+		type 				= (Long) gaeEntity.getProperty( "t" );
+		storage		 		= (Long) gaeEntity.getProperty( "st" );
+		userId			 	= (String) gaeEntity.getProperty( "uid" );
+		voId			 	= (String) gaeEntity.getProperty( "voId" );
+		
+		if( transport != TRANSPORT_EMPTY ) {
+			Blob voCloneBlob	= ( Blob ) gaeEntity.getProperty( "voc" );
+			voClone				= ( voCloneBlob == null ) ? null : voCloneBlob.getBytes();
+		}
+//		if( type != MOVETT ) {
+//			Blob voCloneBlob	= ( Blob ) gaeEntity.getProperty( "voc" );
+//			voClone				= ( voCloneBlob == null ) ? null : voCloneBlob.getBytes();
+//		}
+		
+		return gaeEntity;
+	}
+	
+	protected Entity writeEntity( Context context ) throws VOStoreException {
+		
+		// get entity 
+		Entity gaeEntity = getEntity();
+		
+		// set this entity properties
+		gaeEntity.setUnindexedProperty( "v", version );
+		
+		upd = context.getUniqueDateIncrement();	// get unique date increment for VODevent 
+		gaeEntity.setProperty( "upd", upd );
+				
+		gaeEntity.setUnindexedProperty( "t", type );
+		gaeEntity.setUnindexedProperty( "st", storage );
+		gaeEntity.setUnindexedProperty( "uid", userId );
+		gaeEntity.setUnindexedProperty( "voId", voId );
+		
+		if( transport != TRANSPORT_EMPTY )
+			gaeEntity.setUnindexedProperty( "voc", new Blob( voClone ) );
+//		if( type != MOVETT )
+//			gaeEntity.setUnindexedProperty( "voc", new Blob( voClone ) );
+		
+		return gaeEntity;
+	}
+
+	// ===== interface Externalizable
+
+	public void readExternal( ObjectInput in ) throws IOException, ClassNotFoundException {
+		
+		version = in.readDouble();
+		if( Double.isNaN( version ) ) version = 0;
+		
+		((VOKey) voEntity).id 		= in.readUTF();
+		upd 						= ( Date ) in.readObject();
+		
+		type 						= in.readByte();
+		storage 					= in.readByte();
+		userId 						= in.readUTF();
+		((VOKey) voEntity).tableId 	= in.readUTF();
+		voId 						= in.readUTF();
+		
+		transport 					= in.readByte();
+		if( transport != TRANSPORT_EMPTY )
+			voClone 				= ( byte[] ) in.readObject();
+//		if( type != MOVETT )
+//			voClone 				= ( byte[] ) in.readObject();
+		
+	}
+	
+	public void writeExternal( ObjectOutput out ) throws IOException {
+		
+		out.writeDouble( version );
+		
+		out.writeUTF( getEventId() );
+		out.writeObject( upd );
+		
+		out.writeByte( (byte) type );
+		out.writeByte( (byte) storage );
+		out.writeUTF( userId );
+		out.writeUTF( getTableId() );
+		out.writeUTF( voId );
+		
+		out.writeByte( (byte) transport );
+		if( transport != TRANSPORT_EMPTY )
+			out.writeObject( voClone );
+//		if( type != MOVETT )
+//			out.writeObject( voClone );
+		
+	}
+
+}

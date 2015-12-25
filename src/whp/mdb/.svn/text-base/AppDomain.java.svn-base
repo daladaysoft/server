@@ -1,0 +1,374 @@
+package whp.mdb;
+
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedList;
+
+import whp.gae.RLE;
+import whp.tls.Context;
+
+import com.google.appengine.api.datastore.Entity;
+import com.google.appengine.api.datastore.EntityNotFoundException;
+import com.google.appengine.api.datastore.Key;
+import com.google.appengine.api.datastore.Query;
+import com.google.appengine.api.datastore.Query.FilterOperator;
+
+import flex.messaging.io.ArrayCollection;
+
+/** Centralize domain methods (VODomain,VODomainRoot) */
+public class AppDomain 
+{
+	// ===== constants & static variable
+	
+	private static final int NULL = 0;
+	private static final int ONE = 1;
+	private static final int MANY = 2;
+	
+	
+	// ===== serialized variable
+	// ===== transient variables
+	
+	private Context context;
+	
+	// ===== instance initializer	
+	// ===== constructor
+	
+	public AppDomain( Context context ) {
+		this.context = context;
+	}
+	
+	// ===== PUBLIC, WHP DOMAIN SYNCHRONIZATION (no read, read one, read many)
+	
+	/** Synchronize events (return events fromDate, no event received to store). */
+	public void whpDomainSync( String domainId, Date fromDate ) {
+		domainSyncRead( domainId, fromDate, null );
+	}
+	/** Synchronize events (return events fromDate, receive one event to store).
+	 * Event received are not stored if return code is not OK.*/
+	public void whpDomainSync( String domainId, Date fromDate, VOEvent event ) {
+		domainSyncRead( domainId, fromDate, event );
+	}
+	/** Synchronize events (return events fromDate, receive events collection to store).
+	 * Event received are not stored if return code is not OK. */
+	public void whpDomainSync( String domainId, Date fromDate, ArrayCollection objects ) {
+		domainSyncRead( domainId, fromDate, objects );
+	}
+	
+	// ===== PUBLIC, WHP DOMAIN GET PATH
+	
+	/** Get domains by Id as fast as possible, without instantiate them. Return list of 
+	 * domains id in reverse order (first:child, last:parent) directly in context.answer.
+	 * The root domain is never returned.
+	 * Return RLE.ERR_NOTFOUND if domain not found. */
+	public void whpDomainGetPath( String startDomainId ) {
+		
+		long begTime = System.currentTimeMillis();
+		int count = 0;
+		Entity gaeEntity;
+		
+		while( true ) {
+			count++;
+			Key key = VODomain.getKeyFromFactory( startDomainId );
+			try { gaeEntity = context.ds.get( key ); }
+			catch( EntityNotFoundException e ) {
+				context.setRc( RLE.ERR_NOTFOUND );
+				break;
+			}
+			context.addData( startDomainId );
+			startDomainId = (String) gaeEntity.getProperty( "dpId" );	// dpId: domain parent id
+			if( startDomainId.equals( "D0.0" ) ) break;
+		}
+		
+		context.addLog( "read " + count, begTime );
+	}
+	
+	// ===== PACKAGE, DOMAINS SERVICES
+	
+	// get domain by id
+	
+	/** Search VODomain by id, return domain or null if not found. 
+	 * TODO: add a JVM fast cache (simple hash on id) on domains (as a domain can't be removed,
+	 * and should never be modified). */
+	VODomain domainGetById( String domainId ) {
+						
+		Entity gaeEntity;
+		Key key = VODomain.getKeyFromFactory( domainId );
+		try { gaeEntity = context.ds.get( key ); }
+		catch( EntityNotFoundException e ) {
+			context.addLog( "ERROR, domain '" + domainId + "' not found " );
+			return null;
+		}
+		
+		VODomain domain = ( gaeEntity != null ) ? VODomain.readEntity( gaeEntity ) : null;
+		return domain;
+	}
+	
+	// check domain path
+	// TODO: set domains in cache
+	
+	/** Return the list of domains, from startDomain to stopDomain (lookup).
+	 *  List.size = 0 if startDomain not in stopDomain, else = 1 if startDomain is a direct 
+	 * child of stopDomain, else > 1 following depth of startDomain in stopDomain. 
+	 * <p> List is ordered from parent to children. Example:
+	 * d1(d11, d12), d11(d111, d112, d113), d12(d121), d112(d112a, d112b), and 
+	 * startDomain=d112b, stopDomain=d11, list from 0 to end = d112, d112b if d11 reached.
+	 * Else, list is empty. </p> */
+	LinkedList<VODomain> domainGetPathList( VODomain startDomain, VODomain stopDomain ) {
+		long begTime = System.currentTimeMillis();
+		
+		LinkedList<VODomain> domainList = new LinkedList<VODomain>();
+		if( startDomain != null && stopDomain != null ) {
+			while( startDomain != null && startDomain.getTableId() != null ) {
+				
+				domainList.push( startDomain );
+				if( startDomain.getTableId().equals( stopDomain.getIdd() ) ) return domainList;
+				startDomain = domainGetById( startDomain.getTableId() );
+				if( startDomain == null ) context.addLog( " ERROR (domain.parent of domain " + domainList.getLast().getIdd() + " not found)", begTime );
+				else context.addLog( startDomain.name + " " + domainList.size() + " " + startDomain.getIdd(), begTime );
+			}
+		}
+		
+		// return empty list
+		return new LinkedList<VODomain>();
+	}
+	
+	// ===== PRIVATE, DOMAINS SERVICES
+	
+	// domain synchronize (read events from date, check collision, store received new events)
+	
+	/** Domain synchronization : 
+	 * <li> Make a memory map, that contains one entry for each voId contained in inEvents. </li>
+	 * <li> Get domain (could avoid this get for now, but what if we want to store statistics in the 
+	 * domain ?). For now, the domain is checked. </li>
+	 * <li> Read domain events from the datastore that are greater than fromDate, sorted by date. Start 
+	 * with first event if fromDate is null. </li>
+	 * <li> For each read in datastore, verify if there is a conflict with inEvents by map (same voId).
+	 * Set ERR_DBCONFLICT if conflict detected. </li>  
+	 * <li> If there is no ERR_DBCONFLICT, store inEvents to the datastore (else received inEvents are
+	 * lost (not stored). </li>
+	 * <li> Return the return code that is also memorized in context. </li>
+	 * Use moreData (requests flow). 
+	 * Set RLE.ERR_NOTFOUND if domain not found. 
+	 * Set RLE.ERR_DBCONFLICT if there is a DB conflict. */
+	private int domainSyncRead( String domainId, Date fromDate, Object inEvents ) {
+		
+		long begTime = System.currentTimeMillis();
+		
+		/** Prepare events check, optimize if only one event received one none: 
+		 * If inEvents is an array, create map and store event.voId as unique key in HashMap inEventsMap 
+		 * without value. 
+		 * If inEvents is one event, store event in inEventSingle. 
+		 * If inEvents null, inEventsMap and inEventSingle are null.
+		 * Check by key if inEventsMap != null, else check inEvent != null, else nothing to check. */
+		
+		// set inEventsType to 0 (null, no event), 1 (one, event), 2 (many, array of events)
+		int inEventsType = NULL;
+		
+		// make inEventsMap or inEvent
+		VOEvent inEvent = null;
+		HashMap<String, VOEvent> inEventsMap = null;
+		if( inEvents instanceof VOEvent ) {
+			inEventsType = ONE;
+			inEvent = (VOEvent) inEvents;
+		}
+		else if( inEvents instanceof ArrayCollection ) {
+			inEventsType = MANY;
+			inEventsMap = new HashMap<String, VOEvent>();
+			for( Object object : (ArrayCollection) inEvents ) {
+				if( object instanceof VOEvent ) {
+					inEvent = (VOEvent) object;
+					inEventsMap.put(inEvent.voId, null );
+				}
+			}
+		}
+
+		// Do not check domain (for speed, and for chronological unordered received events).
+		// But this open the door to potential conflicts, as create 2 domains with the same 
+		// name in the same domain, when the client is not synchronized with the server.
+		// Will have to answer to theses situations, because adding data create unique id
+		// so, we cannot have a conflict ... the solution is around the constraints (on name
+		// for example), and take care that some events are to be validated by the server,
+		// because they depends on global constraints (not only local constraints). 
+		
+		
+//	// get domain, exit (lost received inEvents, but lastUpd not updated)
+//	VODomain domain = domainGetById( domainId );
+//	if( domain == null ) return context.setRc( RLE.ERR_NOTFOUND );
+		
+		// get bid
+		String bid = context.getBid();
+		context.addLog( "context.bid " + bid );
+		
+		// lastUpd, the greater event date in datastore, from the last event read
+		Date lastUpd = null;
+		
+		// get events of domain from date
+		Query query;
+//		try {
+			
+//			query = new Query( VOEvent.getGaeKind(), domain.getKey() );
+			query = new Query( VOEvent.getGaeKind(), VODomain.getKeyFromFactory(domainId) );
+//		} catch (VOStoreException e) {
+//			context.addLog( e.getMessage() );
+//			return context.setRc( RLE.ERR_INCONSISTENT );
+//		}
+		if( fromDate == null ) fromDate = new Date( 1 );
+		query.addFilter( "upd", FilterOperator.GREATER_THAN, fromDate );
+		query.addSort( "upd" );
+		
+		int count = 0;
+		boolean moreData = false;
+		Iterable<Entity> gaeEntities = context.ds.prepare( query ).asIterable();
+		for( Entity gaeEntity : gaeEntities ) {
+			
+			count++;
+			VOEvent event = VOEvent.readEntity( gaeEntity );
+			
+			// take lastUpd from event
+			lastUpd = event.upd;
+			
+			// debug trace of events read (remove this for real production version !)
+			String str;
+			if( ! event.getBid().equals( bid ) ) str = " (readReturn) ";
+			else str = " (readStaylo) ";
+			context.addLog( str + "event.bid " + event.getBid() + " domainId " + event.getDomainId() + " tableId " + 
+				event.getTableId() + " id " + event.getEventId() + " voId " + event.voId + " lastUpd: " + lastUpd );
+			
+			// return event only if NOT the same bid as current session
+			if( ! event.getBid().equals( bid ) ) {
+				
+				// send event to the client
+				context.addData( event );
+			
+				// check conflict, if no current conflict
+				if( context.getRc() == RLE.OK ) {
+					if( ( inEventsType == MANY && inEventsMap.containsKey( event.voId ) ) || 
+						( inEventsType == ONE && inEvent.voId.equals( event.voId ) ) ) 
+							context.setRc( RLE.ERR_DBCONFLICT );
+				}
+			}
+			
+			// set moreData and break if limits are reached
+			if( count > 1000 || System.currentTimeMillis() - begTime > 10000 ) {
+				moreData = true;
+				break;
+			}
+		}
+		
+		/** Warning, must examine the situation when limit is reached: all server event are not read
+		 * and thus, we cannot store received events, because there is a potential conflict with 
+		 * remaining not read events. But we also now if there is (or not) a conflict for current
+		 * read in datastore events. */
+		
+		context.addLog( "read " + count + " events ", begTime );
+		context.setMoreData( moreData );
+		
+		// are there events to store
+		if( inEventsType != NULL ) {
+			
+			// return now if a conflict has been detected
+			if( context.getRc() == RLE.ERR_DBCONFLICT ) {
+				context.addLog( "A conflict has been detected, server-received events has been lost." );
+				return context.getRc();
+			}
+		
+			// no conflict, we can store received inEvents now
+			int countEventNotInserted = 0;
+			int countBadType = 0;
+			if( inEventsType == MANY ) {
+				
+				for( Object object : (ArrayCollection) inEvents ) {
+					if( object instanceof VOEvent ) {
+						inEvent = (VOEvent) object;
+						inEvent = eventInsert( inEvent, domainId );
+						if( inEvent == null ) countEventNotInserted++;
+						// OK, events well received from client.
+						// The real question is to update others clients with this new event list.
+						// if event == null continue with error ? YES ... but must have to think about this situation.
+					} else {
+						countBadType++;
+					}
+				}
+				if( countBadType > 0 ) context.addLog( "Warning, found " + countBadType + " elements in inEvents that are not an event." );
+			
+			} else if( inEventsType == ONE )  {
+				
+				inEvent = (VOEvent) inEvents;
+				inEvent = eventInsert( inEvent, domainId );
+				if( inEvent == null ) countEventNotInserted++;
+				
+			}
+			
+			// if at least one event insert failed, do not return lastUpd
+			if( countEventNotInserted > 0 ) {
+				context.addLog( "ERROR " + countEventNotInserted + " events not inserted. LastUpd not returned." );
+				return context.setRc( RLE.ERR_EXECERROR );
+			} 
+			
+		}
+		
+		// return lastUpd to the remote, only if no conflict and all events (if any) inserted
+		if( lastUpd != null ) context.setLastUpd( lastUpd );
+		
+		// synchronization well finished
+		context.setRc( RLE.OK );
+		return context.getRc();
+	}
+	
+	// event insert
+	
+	/** New event insert, follows a lazy strategy : no existence verification (we can
+	 * erase old event with the same newer, see conflict resolution situations), and 
+	 * no domain verification. */
+	private VOEvent eventInsert( VOEvent event, String domainId ) {
+				
+		if( event == null ) return null;
+		event.setDomainId( domainId );
+		
+		// if event add or modify a domain: domains are deployed in GAE in real time
+		if( event.voId.substring(0, 1).equals( VODomain.getGaeKind() ) ) {
+			
+			if( event.type == VOEvent.DELETE ) {
+				
+				// TODO: see revoked on domain
+				context.addLog( "delete.domain, stored but not applied (domain can't be deleted for now)." );
+			
+			} else {
+				
+				// get domain instance from event and deploy it
+				Object object = event.getVoCloneInstance();
+				if( object instanceof VODomain ) 
+					try { domainInsert( (VODomain) object ); }
+					catch( VOStoreException e ) { context.addLog( e.getMessage() ); }
+				else context.addLog( "GRAVE ERROR: kind '" + VODomain.getGaeKind() + "' and voClone " + event.voId + " is not VODomain." );
+			}
+			
+		}
+		
+		// the event can now be inserted
+		try { event.store( context ); } 
+		catch( VOStoreException e ) { context.addLog( e.getMessage() ); }
+		
+		return event;
+	}
+	
+	// insert domain (can only be handled by an event)
+	
+	/** Insert a new domain in datastore. 
+	 * @throws VOStoreException */
+	private VODomain domainInsert( VODomain domain ) throws VOStoreException {
+		long begTime = System.currentTimeMillis();
+		
+		if( domain == null ) return null;
+
+		// Store the new domain, without domain.parent control. This can create a domain
+		// that references a non existing parent - until the parent will be created.
+		
+		domain.store();
+		context.addLog( domain.name, begTime );
+		return domain;
+	}
+	
+	
+	
+}

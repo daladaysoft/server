@@ -1,0 +1,14 @@
+package whp.mdb;
+
+/** A structure that store the key of any WHP VO. */
+public class VOKey {
+	
+	public String			domainId;	// datastore ancestor
+	public String			tableId;	// datastore kind
+	public String			id;			// datastore id (auto id) or name (string id)
+	
+	public String getInfo() {
+		return "VOKey (domainId " + domainId + ", tableId " + tableId + ", id " + id + ")";
+	}
+	
+}

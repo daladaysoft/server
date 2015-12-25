@@ -1,0 +1,339 @@
+package whp.mdb;
+
+import java.io.Externalizable;
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+
+import whp.gae.RLE;
+
+import com.google.appengine.api.datastore.DatastoreService;
+import com.google.appengine.api.datastore.DatastoreServiceFactory;
+import com.google.appengine.api.datastore.Entity;
+import com.google.appengine.api.datastore.Key;
+import com.google.appengine.api.datastore.KeyFactory;
+
+public abstract class VOBaseFull extends RLE implements Externalizable
+{
+	// ===== constants & static variable
+	
+	private static final double VERSION = 0.01;
+	
+	// ===== serialized variable
+	
+	public	double	 		version;
+	
+	/** Can be VOKey (temporary store domainId, voId, voTableId) if GAE Entity not exists,
+	 * that is the case when the VO is just unserialized, else voEntity is Entity, that
+	 * contains (domainId, voId, voTableId) in its Key.
+	 * Getters for domainId, voId, voTableId manage these situations. */
+	private Object		voEntity;
+	
+	public	String			name;
+	
+	// ===== transient variables
+	
+	// ===== constructor
+	
+	/** Default constructor, without entity. Set voEntity with temporary key VOKey. */
+	public VOBaseFull() { 
+		voEntity = new VOKey(); 
+	}	
+	
+	/** The GAE Entity is know. Set voEntity as Entity (avoid instantiation of temporary key storage). */
+	public VOBaseFull( Entity gaeEntity ) {
+		voEntity = gaeEntity;
+	}
+	
+	// ===== storage related properties
+	
+	/** Return domainId if loaded, else null.
+	 * Use as GAE Key ancestor if not domain. */
+	public final String getDomainId() { 
+		if( voEntity instanceof VOKey ) return ((VOKey) voEntity).domainId;
+		if( voEntity instanceof Entity ) {
+			Key parentKey = ((Entity) voEntity).getKey().getParent();
+			if( parentKey != null ) return parentKey.getName();
+		}
+		return null;
+	}
+	
+	/** Set domainId, return domainId if was not already set, else 
+	 * return null (domainId is write-once, cannot be changed). */
+	public final String setDomainId( String domainId ) {
+		if( voEntity instanceof VOKey && ((VOKey) voEntity).domainId == null ) {
+			((VOKey) voEntity).domainId = domainId;
+			return domainId;
+		}
+		return null;
+	}
+	
+	/** Allows specialized classes to be stored in root domain. Do not use
+	 * this callback on other classes (they should not be allowed to be stored
+	 * in the root domain). Not checked for domains that are root entities. */
+	public boolean isDomainRootAllowed() { return false; }
+	
+	/** Return tableId if loaded, else null.
+	 * If voEntity is Entity, return the kind except for domain that has a
+	 * fixed kind "D" and use _domainParentId as parent.
+	 * Used as GAE Key Kind. */
+	public final String getTableId() { 
+		if( voEntity instanceof VOKey ) return ((VOKey) voEntity).tableId;
+		if( voEntity instanceof Entity ) {
+			if( this instanceof VODomain ) return ((VODomain) this)._domainParentId;
+			return ((Entity) voEntity).getKey().getKind();
+		}
+		return null;
+	}
+	
+	/** Set tableId, return tableId if was not already set, else 
+	 * return null (tableId is write-once, cannot be changed). */
+	public final String setTableId( String tableId ) {
+		if( voEntity instanceof VOKey && ((VOKey) voEntity).tableId == null ) {
+			((VOKey) voEntity).tableId = tableId;
+			return tableId;
+		}
+		return null;
+	}
+	
+	/** Return id if loaded, else null.
+	 * Id is GAE Key Name or Id according isAutoGlobalId. */
+	public final String getIdd() { 
+		if( voEntity instanceof VOKey ) 	return ((VOKey) voEntity).id;
+		if( voEntity instanceof Entity ) 	
+			if( isAutoGlobalId() == false ) return ((Entity) voEntity).getKey().getName();
+			else return Long.toString( ((Entity) voEntity).getKey().getId() );
+		return null;
+	}
+	
+	/** Return null if isAutoGlobalId true and id 0 (never stored: not valid).
+	 * Else return, depending on isAutoGlobalId (false) id, (true) kind+id.
+	 * Used to serialize id (network write) and to get kind from table (table.getIdFull). 
+	 * This works only because it is not possible to receive a serialized VO isAutoGlobalId 
+	 * from external source (VO that have auto id are managed by GAE only, else we would 
+	 * have to manage the separation between kind and id of these VO, if they was received
+	 * in serialized form, not coded for now).*/
+	public final String getIdFull() { 
+		if( voEntity instanceof VOKey ) {
+			if( isAutoGlobalId() == false ) return ((VOKey) voEntity).id;
+			else if( ! ((VOKey) voEntity).id.equals( "0" ) ) 
+				return ((VOKey) voEntity).tableId + ((VOKey) voEntity).id;
+			
+		} else {
+			if( isAutoGlobalId() == false ) return ((Entity) voEntity).getKey().getName();
+			else if( ((Entity) voEntity).getKey().getId() != 0 )
+				return ((Entity) voEntity).getKey().getKind() + Long.toString( ((Entity) voEntity).getKey().getId() );
+		}
+		return null;	// id 0 not valid
+	}
+	
+	/** Set id, return id if was not already set, else 
+	 * return null (id is write-once, cannot be changed). */
+	public final String setId( String id ) {
+		if( voEntity instanceof VOKey && ((VOKey) voEntity).id == null ) {
+			((VOKey) voEntity).id = id;
+			return id;
+		}
+		return null;
+	}
+	
+	/** Return key info. Assert a WHP key, and name provided even if long id used (test is necessary). */
+	public final String getKeyInfo() {
+		if( voEntity == null ) return "";
+		if( voEntity instanceof VOKey ) return ((VOKey) voEntity).getInfo();
+		if( voEntity instanceof Entity ) {
+			Entity entity = (Entity) voEntity;
+			return "Entity (domainId " + entity.getKey().getParent().getName() 
+				+ ", tableId " + entity.getKey().getKind() 
+				+ ", id " + entity.getKey().getName() + ")";	// is this OK if long id ?
+		}
+		return "ERROR, voEntity is not null, not VOKey, not Entity...";
+	}
+	
+	/** Return null if isConsistent, else return a message. 
+	 * Check here a standard VO (not in root domain) consistency. 
+	 * (domains override isConsistent). */
+	public String isConsistent() {
+		if( getDomainId() == null ) return "domainId is null (see setDomainId)";
+		if( getIdd() == null ) return "id is null";
+		if( getTableId() == null ) return "tableId is null";
+		return null;
+	}
+	
+	// ===== call backed by parent classes
+	
+	/** Allows a extend class to declare an id that is global (generated by the 
+	 * server) and can be not WHP unique (as could be an GAE auto long id). 
+	 * Used by VOUser and VOMdb entities). Default is false. */
+	protected boolean isAutoGlobalId() { return false; }
+	
+	// ===== specific this VO methods
+	
+	// ===== standard GAE Entities management
+	
+	// ----- store, unstore
+	
+	/** Store GAE Entity (create a new or reuse previous). Warning, the domainId MUST 
+	 * be set (setDomainId) before store can be used if the VO is a new inserted VO, 
+	 * else store will throw VOStoreException. The ds.put() maintains accurate the Key of
+	 * the Entity: because this, voEntity get the correct key if set by GAE (auto long id). */
+	public void store() throws VOStoreException {
+		
+		// check isConsistent before attempt to store the VO
+		if( isConsistent() != null ) throw new VOStoreException( isConsistent() );
+		
+		// store GAE entity. This set the id if given by GAE.
+		DatastoreService ds = DatastoreServiceFactory.getDatastoreService();
+		ds.put( writeEntity() );
+	}
+	
+	/** Not implemented. */
+	public void unstore() throws VOStoreException {}
+	
+	// ----- get a valid GAE Entity
+	
+	/** Create a new GAE entity if not already acquired (and store it in voEntity),
+	 * else reuse voEntity. All GAE Key construction rules for inherited classes 
+	 * (VOBaseFull, VOBaseTable, VODomain ...) are managed in this method (that 
+	 * cannot be override). 
+	 * @throws VOStoreException */
+	private Entity getEntity() throws VOStoreException {
+		
+		// if voEntity is already an Entity return it
+		if( voEntity instanceof Entity ) return (Entity) voEntity;
+		
+		// create Entity from temporary (domainId, voId, voTableId) stored in VOKey
+		VOKey voKey = (VOKey) voEntity;
+		
+		// if this is a domain: simple root entity "D" + id
+		if( this instanceof VODomain ) {
+			
+			// save the tableId as parent domain
+			((VODomain) this)._domainParentId = voKey.tableId;
+			
+			// create GAE Key for a VODomain : kind "D", name id, root Entity (no ancestor)
+			voEntity = new Entity( "D", voKey.id );
+			return (Entity) voEntity;
+			
+		} 
+		
+		// set domain to D0.0 automatically if null and allowed
+		if( voKey.domainId == null ) {
+			if( isDomainRootAllowed() ) voKey.domainId = "D0.0";
+			else throw new VOStoreException( "domainId is null on " + voKey.getInfo() );
+		}
+		
+		// if standard Name key	
+		if( isAutoGlobalId() == false ) {
+	
+			// create GAE Key for a VOBaseFull and VOBaseTable (same rules)
+			if( voKey.domainId.equals( "D0.0" ) ) {
+				// there is no ancestor nor transactions in domain root
+				voEntity = new Entity( voKey.tableId, voKey.id );
+			} else {
+				// else VO have their domain as root entity (transactions are available)
+				Key parentKey = KeyFactory.createKey( "D", voKey.domainId );
+				voEntity = new Entity( voKey.tableId, voKey.id, parentKey );
+			}
+			return (Entity) voEntity;
+			
+		}
+		
+		// if Key is long auto by GAE, and exists
+		if( voKey.id != null ) {
+			
+			// reuse given id
+			long numId = Long.parseLong( voKey.id );
+			
+			// create GAE Key for a VOBaseFull and VOBaseTable (same rules)
+			if( voKey.domainId.equals( "D0.0" ) ) {
+				// there is no ancestor nor transactions in domain root
+				voEntity = new Entity( voKey.tableId, numId );
+			} else {
+				// else VO have their domain as root entity (transactions are available)
+				Key parentKey = KeyFactory.createKey( "D", voKey.domainId );
+				voEntity = new Entity( voKey.tableId, numId, parentKey );
+			}
+			return (Entity) voEntity;
+		}
+		
+		// if Key is long auto by GAE, and not exists (id will be available after store)
+		if( voKey.domainId.equals( "D0.0" ) ) {
+			// there is no ancestor nor transactions in domain root
+			voEntity = new Entity( voKey.tableId );
+		} else {
+			// else VO have their domain as root entity (transactions are available)
+			Key parentKey = KeyFactory.createKey( "D", voKey.domainId );
+			voEntity = new Entity( voKey.tableId, parentKey );
+		}
+		return (Entity) voEntity;
+	
+	}
+	
+	// Template for implement readEntity in extended class VOExample 
+	// Read GAE Entity, unserialize it and return a new instanced VO:
+	//		public static VOExample readEntity( Entity gaeEntity ) {
+	//			VOExample vo = new VOExample( gaeEntity );
+	//			vo.readEntityBase();
+	//			return vo;
+	//		}
+	
+	// ----- GAE Key services
+	
+	/** Return GAE Key if exists, else make a new Entity (not stored)
+	 * and return Key.
+	 * @throws VOStoreException */
+	public final Key getKey() throws VOStoreException { 
+		return getEntity().getKey();
+	}
+	
+	// static methods dedicated to specialized classes when entity is reachable from the domain
+	// (for now: VODomain, VOUser, VOUserSession, VOMdb):
+	// 		public static String getGaeKind( ... )
+	// 		public static Key getKeyFromFactory( ... )
+	
+	// ===== serialize GAE Entity
+	
+	protected Entity readEntityBase() {
+		
+		Entity gaeEntity 	= (Entity) voEntity;
+		
+		version 			= (Double) gaeEntity.getProperty( "v" );
+		name				= (String) gaeEntity.getProperty( "name" );
+		
+		return gaeEntity;
+	}
+	
+	protected Entity writeEntity() throws VOStoreException {
+		
+		// get entity 
+		Entity gaeEntity = getEntity();
+		
+		// set this entity properties
+		gaeEntity.setUnindexedProperty( "v", version );				
+		gaeEntity.setUnindexedProperty( "name", name );
+		
+		return gaeEntity;
+	}
+	
+	// ===== interface Externalizable
+	
+	public void readExternal( ObjectInput in ) throws IOException, ClassNotFoundException {
+		
+		version = in.readDouble();
+		if( Double.isNaN( version ) ) version = 0;
+		// use setTableId and setId here ? (if voEntity was Entity, not VOKey ?)
+		((VOKey) voEntity).tableId 	= in.readUTF();
+		((VOKey) voEntity).id 		= in.readUTF();
+		name 						= in.readUTF();
+	}
+	
+	public void writeExternal( ObjectOutput out ) throws IOException {
+		
+		out.writeDouble( VERSION );
+		
+		out.writeUTF( getTableId() );
+		out.writeUTF( getIdFull() );
+		out.writeUTF( ( name != null ) ? name : "" );
+	}
+}

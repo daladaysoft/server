@@ -1,0 +1,221 @@
+package whp.tls;
+
+import java.util.Date;
+
+import com.google.appengine.api.datastore.DatastoreService;
+import com.google.appengine.api.datastore.DatastoreServiceFactory;
+
+import flex.messaging.io.ArrayCollection;
+
+import whp.Answer;
+import whp.VOLog;
+import whp.WHPBroker;
+import whp.gae.DLAtom;
+import whp.mdb.VOUserSession;
+
+/** Context, store data during a request execution.
+ * Provided by {@link TLFactory#getContext()}, that is called by the 
+ * broker instance initializer on each request {@link WHPBroker}. */
+public class Context {
+	
+	// ===== constants & static variable
+	
+	private static int		idCounter;
+	public int				id;
+	
+	// ===== serialized variable
+	// ===== transient variables
+	
+	/** Answer object, will be returned to remote. */
+	private Answer	 		answer;
+	
+	/** convenient datastore service */
+	public DatastoreService ds;
+	
+	// ----- if authenticate success
+	
+	// RPC name that initiate this context
+	@SuppressWarnings("unused")
+	private String 			rpcName;
+	
+	// user informations
+	public 	String 			userId;						// loaded if session authenticated
+	public 	VOUserSession 	userSession;				// loaded if session authenticated
+	public 	String			userDomainId;				// connected user domain id
+	
+	// unique date and sharded counters
+	public 	long			uniqueDate;					// update unique date in whp transaction
+	public	long			uniqueDateIncrement;		// uniqueDate + 1 (n times)
+	public	long			uniqueDateIncrementCount;	// increment use count (max SHARDED_INTERVAL)
+	
+	// ===== instance initializer, data that can be alive across RPC
+	{
+		// initialize only once
+		ds = DatastoreServiceFactory.getDatastoreService();
+		id = idCounter++;	// TODO: circular counter (uint ?)
+	}
+	
+	// ===== constructor
+	
+	public Context( String rpcName ) {
+		this.rpcName = rpcName;
+		//System.out.println( rpcName + " new context " + id ); 
+	}
+	
+	// ===== private methods
+	
+	// ===== global context management
+	
+	/** Clean and set the context before use it. Automatically done by WHPBroker on each incoming RPC
+	 * that use authenticate, and done RPC that use context and not authenticate.
+	 * This is necessary, because the context is allocated by thread local, that depends on J2EE pool
+	 * thread management, that can reuse a thread and thus, do not allocate a new context on starting
+	 * RPC. */
+	public Context clean() {
+		
+		// answer is the part of context that will be returned to the remote 
+		answer = new Answer();
+		
+		answer.serverElapse = System.currentTimeMillis(); 
+		answer.log = null;		// lazy initialization
+		answer.moreData = false;
+		answer.rc = 0;
+		
+		// user session store user, session and bid informations
+		userSession = null;
+		
+		// reset unique date (next use of unique date will load from DLAtom)
+		resetUniqueDate();
+		
+		return this;
+	}
+	
+	/** Return answer to the remote RPC. Note that the context is not removed here from thread 
+	 * local, nor cleaned, because it's instanced (if J2EE thread pool start a new thread for
+	 * us), or cleaned (if J2EE thread pool reuse an old thread) by WHPBroker instantiation.  */
+	public final Answer returnAnswer() {
+		
+		answer.serverElapse = System.currentTimeMillis() - answer.serverElapse;
+		return (Answer) answer;
+	}
+	
+	// ===== context services
+	
+	// add data array
+	
+	/** Add a data to previous pending data. */
+	public void addData( Object o ) {
+		if( ! (o instanceof java.io.Externalizable) && ! (o instanceof java.io.Serializable) )
+			throw new Error( "Answer accept only Externalizable or Serializable objects (received: " + o.getClass() + ")" );	
+		if( o instanceof ArrayCollection )
+			throw new Error( "Answer can't add an array. See setData()" );
+		
+		Object data = answer.data;
+		// if data null, data = o
+		if( data == null ) data = o;
+		else { 
+			// if data is not array, set an array with previous data value
+			if( ! (data instanceof ArrayCollection) ) {
+				Object tmp = data;
+				data = new ArrayCollection();
+				((ArrayCollection)data).add( tmp );
+			}
+			// add o to data array
+			((ArrayCollection)data).add( o );
+		}
+		answer.data = data;	
+	}
+	
+	// moreData
+	
+	/** set moreData */
+	public void setMoreData( boolean v ) { answer.moreData = v; }
+	
+	// lastUpd 
+	
+	/** set LUPD (last update date) */
+	public Date setLastUpd( Date v ) { return answer.lastUpd = v; }
+	public Date getLastUpd() { return answer.lastUpd; }
+	
+	// RC, return code
+	
+	/** set return code (rc) */
+	public int setRc( int v ) { return answer.rc = v; }
+	public int getRc() { return answer.rc; }
+	
+	// log
+	
+	public void addLog( VOLog o ) {
+		if( answer.log == null ) answer.log = new ArrayCollection();
+		answer.log.add( o );	
+	}
+	
+	// session authenticate
+	
+	/** Il semble manquer le userId et userDomainId dans authenticate
+	 * (en tout cas il me semble que ces valeurs ne sont pas chargées dans contexte) */
+	
+	public void setUserSession( VOUserSession userSession ) { 
+		this.userSession = userSession; 
+	}
+	public VOUserSession getUserSession() { 
+		return userSession; 
+	}
+	
+	public String getBid() { 
+		return userSession.bid;
+	}
+	
+	// update unique date (transaction id ?)
+	
+	/** For now, only getUniqueDateIncrement is used. But other commented 
+	 * methods will may be use by transactions. */
+	
+	private void resetUniqueDate() {
+		uniqueDate = uniqueDateIncrement = 0;
+		uniqueDateIncrementCount = DLAtom.SHARDED_INTERVAL;
+	}
+//	public Date getUniqueDate() {
+//		if( uniqueDate == 0 ) {
+//			uniqueDate = uniqueDateIncrement = DLAtom.getDateUnique( this );
+//			uniqueDateIncrementCount = DLAtom.SHARDED_INTERVAL;
+//		}
+//		return new Date( uniqueDate );
+//	}
+	
+	/** Return a date that is unique across many JVM, and that is guaranteed unique, and greater
+	 * than previous return. Use a sharded method to avoid a datastore get for each date request,
+	 * based on uniqueDateIncrementCount (each date requested after resetUniqueDate get last 
+	 * datastore unique date, with DLAtom.SHARDED_INTERVAL milliseconds reserved in the future. Allow
+	 * "guaranteed unique, and greater" without datastore request for SHARDED_INTERVAL date get). 
+	 * If the counter SHARDED_INTERVAL is reached, a new datastore request is done.  */
+	public Date getUniqueDateIncrement() {
+		if( uniqueDate == 0 ) {
+			uniqueDate = uniqueDateIncrement = DLAtom.getDateUnique( this );
+			uniqueDateIncrementCount = DLAtom.SHARDED_INTERVAL;
+		}
+		else {
+			uniqueDateIncrement++;
+			uniqueDateIncrementCount--;
+			if( uniqueDateIncrementCount == 0 ) {
+				addLog( "ALERT, uniqueDateIncrement reach " + uniqueDateIncrement + " use." );
+				resetUniqueDate();
+				return getUniqueDateIncrement();
+			}
+		}
+		return new Date( uniqueDateIncrement );
+	}
+//	public long getUniqueDateIncrementCount() {
+//		return uniqueDateIncrementCount;
+//	}
+	
+	// convenient methods
+	
+	public void addLog( String s ) {
+		addLog( new VOLog( s, 3 ) );
+	}
+	public void addLog( String s, long begTime ) {
+		addLog( new VOLog( s + " (" + (System.currentTimeMillis()-begTime) + " ms)", 3 ) );
+	}
+	
+}
