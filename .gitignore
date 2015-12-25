@@ -1,0 +1,6 @@
+$ cat .gitignore
+    # exclude everything except directory WhpServer1/src
+    /*
+    !/WhpServer1
+    /WhpServer1/*
+    !/WhpServer1/src
