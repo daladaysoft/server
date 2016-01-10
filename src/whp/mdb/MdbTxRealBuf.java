@@ -21,14 +21,13 @@ public class MdbTxRealBuf extends MdbTxReal {
 		_ttype = 0;
 		upddate = 0;
 		riso = 0;
-		tid = userId = null;
+		tid = userId = 0;
 		return this;
 	}
 	
 	/** Same as a constructor, but on current transaction object. 
-	 * Always set hasDomain true (dedicated to insert domains only for now). 
-	 * Set always transaction id as 't0.0' for now. */
-	public void initialize( int ttype, TXRISO riso, String userId ) {
+	 * Always set hasDomain true (dedicated to insert domains only for now).  */
+	public void initialize( int ttype, TXRISO riso, long userId ) {
 		length = eventsCount = 0;
 		timer = ( int ) System.currentTimeMillis();
 		
@@ -37,7 +36,7 @@ public class MdbTxRealBuf extends MdbTxReal {
 		this.upddate = System.currentTimeMillis();
 		this.riso = riso.ordinal();
 		// TODO: generate TID here (server transaction id : t0.id, t for transaction, 0 for server base id, id from unique date)
-		this.tid = "t0.0";
+		this.tid = MdbId.getNewIdTx();
 		this.userId = userId;
 	}
 }

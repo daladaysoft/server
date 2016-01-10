@@ -327,7 +327,10 @@ public class WHPBroker
 		catch( EntityNotFoundException e ) {}
 		
 		// failed if session not found
-		if( gaeEntity == null ) return null;
+		if( gaeEntity == null ) {
+			if( context.isGaeSdk() ) System.out.println( "userId " + userId + " usId " + usId + " === NOT VALID" );
+			return null;
+		}
 		
 		// get VOUserSession
 		VOUserSession userSession = VOUserSession.readEntity( gaeEntity );
@@ -340,7 +343,10 @@ public class WHPBroker
 		 * */
 		
 		// check timestamp
-		if( ! usTimestamp.equals( userSession.timestamp ) ) return null;
+		if( ! usTimestamp.equals( userSession.timestamp ) ) { 
+			if( context.isGaeSdk() ) System.out.println( "usTimestamp " + "as3 " + usTimestamp + " userSession " + userSession.timestamp + " === NOT VALID" );
+			return null;
+		}
 		
 		// authenticate successful, set context 
 		context.setUserSession( userSession );

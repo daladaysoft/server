@@ -7,10 +7,10 @@ import whp.VOLog;
 import whp.WHPBroker;
 import whp.mdb.VOUserSession;
 import ads.type.BytesOut;
-import ads.type.LongAds;
 
 import com.google.appengine.api.datastore.DatastoreService;
 import com.google.appengine.api.datastore.DatastoreServiceFactory;
+import com.google.appengine.api.utils.SystemProperty;
 
 import flex.messaging.io.ArrayCollection;
 
@@ -40,7 +40,7 @@ public class Context {
 	private String 			rpcName;
 	
 	// user informations
-	public 	String 			userId;						// loaded if session authenticated
+	public 	long 			userId;						// loaded if session authenticated
 	public 	VOUserSession 	userSession;				// loaded if session authenticated
 	public 	String			userDomainId;				// connected user domain id
 	
@@ -255,6 +255,13 @@ public class Context {
 	public void addRcLog( int v, String s, long begTime ) {
 		setRc( v );
 		addLog( s, begTime );
+	}
+	
+	// environment
+	
+	/** Return true if we are in GAE SDK, false if we are in google datacenter (= in production). */
+	public boolean isGaeSdk() {
+		return( SystemProperty.environment.value() != SystemProperty.Environment.Value.Production );
 	}
 	
 }

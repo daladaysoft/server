@@ -22,7 +22,8 @@ public class RLE
 	public static final int OK_ASYNC 		= 1;
 	
 	public static final int COMMENT 		= 10;
-	public static final int TITLE 			= 11;
+	public static final int TITLE1 			= 11;
+	public static final int TITLE2 			= 12;
 	
 	public static final int INF_NOTLOGGED	= 20;
 	public static final int INF_NETDOWN		= 21;
@@ -46,6 +47,8 @@ public class RLE
 	public static final int ERR_NOTEXIST	= 55;
 	public static final int ERR_SHARDEDOVER	= 56;
 	public static final int ERR_NOTVALID	= 57;
+	
+	public static final int WRN_PUBSUB		= 60;
 	
 	public static final int ERR_DBCONFLICT	= 70;
 	public static final int ERR_DBERROR		= 71;
@@ -78,7 +81,8 @@ public class RLE
 			RLELIBS[ OK ] 				= "ok";
 			RLELIBS[ OK_ASYNC ]			= "okAsyncLaunched";
 			RLELIBS[ COMMENT ]			= "comment";
-			RLELIBS[ TITLE ]			= "title";
+			RLELIBS[ TITLE1 ]			= "title1";
+			RLELIBS[ TITLE2 ]			= "title2";
 			
 			RLELIBS[ INF_NOTLOGGED ] 	= "notLogged";
 			RLELIBS[ INF_NETDOWN ] 		= "networkDown";
@@ -102,6 +106,8 @@ public class RLE
 			RLELIBS[ ERR_NOTEXIST ] 	= "notExist";
 			RLELIBS[ ERR_SHARDEDOVER ] 	= "shardedOverflow";
 			RLELIBS[ ERR_NOTVALID ] 	= "notValid";
+			
+			RLELIBS[ WRN_PUBSUB ] 		= "warnPubSub";
 			
 			RLELIBS[ ERR_DBCONFLICT ] 	= "dbConflict";
 			RLELIBS[ ERR_DBERROR ] 		= "dbError";

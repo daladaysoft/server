@@ -37,10 +37,10 @@ public class MdbTxReal {
 	public int riso;
 	
 	/** Transaction id, unique. */
-	public String tid;
+	public long tid;
 	
 	/** User id */
-	public String userId;
+	public long userId;
 	
 	// ===== transient
 	
@@ -72,8 +72,8 @@ public class MdbTxReal {
 		out.writeLong( txo );
 		out.writeDouble( upddate );
 		out.writeByte( riso );
-		out.writeUTF( tid );
-		out.writeUTF( userId != null ? userId : "" );
+		out.writeDouble( tid );
+		out.writeDouble( userId );
 		
 		return out.size() - size;
 	}
@@ -83,11 +83,11 @@ public class MdbTxReal {
 	 * @throws IOException */
 	public void readBytes( AMF3Deserializer in ) throws IOException {
 		
-		_ttype = in.readByte();
+		_ttype = in.readUnsignedByte();
 		txo = in.readLong();
 		upddate = ( long ) in.readDouble();
-		riso = in.readByte();
-		tid = in.readUTF();
-		userId = in.readUTF();
+		riso = in.readUnsignedByte();
+		tid = ( long ) in.readDouble();
+		userId = ( long ) in.readDouble();
 	}
 }

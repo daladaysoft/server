@@ -8,13 +8,14 @@ import javax.xml.bind.DatatypeConverter;
 public class Base64 {
 	
 	/** Return string s as encoded string. */
-	public static String encode( String s ) throws UnsupportedEncodingException {
+	public static String encode( String s ) {
 		
-		byte[] bs;
+		byte[] bs = null;
 		String encoded = null;
 		
 		if( s != null ) {
-			bs = s.getBytes( "UTF-8" );
+			try { bs = s.getBytes( "UTF-8" ); } 
+			catch ( UnsupportedEncodingException e ) { throw new Error( e.getMessage() ); }
 			encoded = DatatypeConverter.printBase64Binary( bs );
 		} 
 		return encoded;

@@ -9,14 +9,16 @@ import java.util.LinkedList;
 
 import org.granite.messaging.amf.io.AMF3Deserializer;
 import org.granite.messaging.amf.io.AMF3Serializer;
+import org.granite.util.Base64;
 
 import whp.WHPBroker;
 import whp.gae.RLE;
 import whp.tls.Context;
 import whp.util.Misc;
 import ads.cst.TXRISO;
-import ads.type.LongAds;
+import ads.net.pusher.Pusher;
 import ads.type.BytesOut;
+import ads.type.LongAds;
 
 import com.google.appengine.api.datastore.Blob;
 import com.google.appengine.api.datastore.DatastoreFailureException;
@@ -31,6 +33,9 @@ import com.google.appengine.api.datastore.Query.Filter;
 import com.google.appengine.api.datastore.Query.FilterPredicate;
 import com.google.appengine.api.datastore.Query.SortDirection;
 import com.google.appengine.api.datastore.Transaction;
+import com.google.appengine.api.urlfetch.HTTPResponse;
+import com.google.appengine.labs.repackaged.org.json.JSONException;
+import com.google.appengine.labs.repackaged.org.json.JSONObject;
 
 /** Centralize domain methods (VODomain,VODomainRoot) */
 public class AppDomain 
@@ -404,16 +409,7 @@ public class AppDomain
 					context.setRc( RLE.ERR_INCONSISTENT );
 					streamClose( tx );
 					return context.getRc();
-				}
-				// check txo
-				if( txo.value != 0 ) {
-					dst.rollback();
-					context.addLog( "transaction received: txo not 0" );
-					context.setRc( RLE.ERR_INCONSISTENT );
-					streamClose( tx );
-					return context.getRc();
-				}
-				
+				}				
 			}
 			catch ( IOException e ) {
 				dst.rollback();
@@ -449,6 +445,10 @@ public class AppDomain
 		
 		int count = 0;
 		boolean moreData = false;
+		long entityIndex;
+		long entityIndexMax;
+		long entitytxo = 0;
+		long entityId;
 		Iterable<Entity> gaeEntities = ds.prepare( dst, query ).asIterable();
 		for( Entity gaeEntity : gaeEntities ) {
 			
@@ -459,10 +459,10 @@ public class AppDomain
 			entityUpdKey = gaeEntity.getKey().getId();
 			
 			// get index and id
-			long entityIndex 		= ( Long ) gaeEntity.getProperty( "tindex" );
-			long entityIndexMax 	= ( Long ) gaeEntity.getProperty( "tindexmax" );
-			long entitytxo 			= ( Long ) gaeEntity.getProperty( "txo" );
-			long entityId 			= ( Long ) gaeEntity.getProperty( "tid" );
+			entityIndex 	= ( Long ) gaeEntity.getProperty( "tindex" );
+			entityIndexMax 	= ( Long ) gaeEntity.getProperty( "tindexmax" );
+			entitytxo 		= ( Long ) gaeEntity.getProperty( "txo" );
+			entityId 		= ( Long ) gaeEntity.getProperty( "tid" );
 			
 			context.addLog( "read transaction tid " + entityId );
 			
@@ -471,6 +471,7 @@ public class AppDomain
 				if( entityIndex != entityIndexMax ) continue; // skip to next chunk
 				dst.rollback();
 				context.addLog( "read, already received transation (ok)" );
+				context.setTxo( entitytxo );
 				context.setLastUpd( entityUpdKey );
 				context.setRc( RLE.OK );
 				streamClose( out );
@@ -527,7 +528,7 @@ public class AppDomain
 				dst.rollback();
 				context.addLog( "transaction received: conflict, not stored.", begTime );
 				context.setBytesOut( outBytes ); 
-				context.setTxo( outTxo );
+				context.setTxo( entitytxo );
 				context.setLastUpd( outUpdDate );
 				context.setMoreData( moreData );
 				streamClose( out );
@@ -538,7 +539,7 @@ public class AppDomain
 				dst.commit();
 				context.addLog( "domainSyncRead: sync data", begTime );
 				context.setBytesOut( outBytes ); 
-				context.setTxo( outTxo );
+				context.setTxo( entitytxo );
 				context.setLastUpd( outUpdDate );
 				context.setMoreData( moreData );
 				streamClose( out );
@@ -557,6 +558,15 @@ public class AppDomain
 			context.addLog( "domainSyncRead: empty sync", begTime );
 			context.setMoreData( false );
 			return context.setRc( RLE.OK );
+		}
+		
+		// last check of txo on received tx (txo can be set on double receive (trap before), else not allowed)
+		if( txo.value != 0 ) {
+			dst.rollback();
+			context.addLog( "transaction received: not double and txo not 0" );
+			context.setRc( RLE.ERR_INCONSISTENT );
+			streamClose( tx );
+			return context.getRc();
 		}
 		
 		// === received tx is not in conflict nor doubled, we have to set unique date and store
@@ -666,9 +676,80 @@ public class AppDomain
 		context.setTxo( txo.value );
 		context.setLastUpd( entityUpdKey );
 		
-		// TODO: push transaction to pubsub broker here
+		// if received tx, push to pubsub broker (pusher)
+		if( txBytes != null ) {
+			txPublish( txBytes, txo, domainId );
+		}
 		
 		return context.getRc();
+	}
+	
+	/** Publish tx (used for received tx validated). Tx is encoded as Pusher "tx" event.
+	 * PusherEvent has 3 properties (channel, event, data), data has 3 properties (event, key, data), 
+	 * and 2 optional if fragmented (fcur, fmax).
+	 * <li> event.channel: "D" + domainId explained. Type is String. </li>
+	 * <li> event.event: "tx". Type is String. </li>
+	 * <li> event.data: object event in pusher event, allow fragmentation. Type is json object. </li>
+	 * <li> event.data.key: unique event key, "tx" use txo (long). Key type depends on event.event. </li>
+	 * <li> event.data.fcur: current fragment index. Type is integer. </li>
+	 * <li> event.data.fmax: number of fragments, present only on first fragment (fcur 0). Type is integer.</li>
+	 * <li> event.data.data: event.event content, for "tx" = transaction. Type is Base64.</li>
+	 * 
+	 * TODO il faudrait peut être faire attention au temps de la transaction gae (dans l'espace autorisé ?) */
+	private boolean txPublish( byte[] txBytes, LongAds txo, long domainId ) {
+		
+		long dt = System.currentTimeMillis();
+		
+		int chunkSzMax = 9000;										// 10 KB minus pusher and http overhead		
+		String tx64 = Base64.encodeToString( txBytes, false );		// get tx coded as base64 string 
+		int tx64len = tx64.length();								// tx64 length
+		int fcur = 0;												// current fragment index
+		int fmax = tx64len / chunkSzMax;							// number of fragments
+		if( ( tx64len % chunkSzMax ) != 0 ) fmax++;					// adjust fmax if modulo not 0
+		
+		JSONObject json = new JSONObject();
+		int chunkPos = 0;
+		int chunkSz = 0;
+		while( fcur < fmax ) {
+			
+			try {
+				
+				// compute size to write, set position
+				chunkPos += chunkSz;
+				chunkSz = tx64len - chunkPos;
+				if( chunkSz > chunkSzMax ) chunkSz = chunkSzMax;
+				
+				// populate json fragment
+				json.put( "key", txo.value );
+				json.put( "fcur", fcur );
+				if( fcur == 0 ) json.put( "fmax", fmax );
+				else json.remove( "fmax" );
+				json.put( "data", tx64.substring( chunkPos, ( chunkPos + chunkSz ) ) );
+				
+				// write json to pusher
+				HTTPResponse hr = Pusher.triggerPush( "D" + MdbId.idExplained( domainId ), "tx", json.toString() );
+				String msg = "channel: " + "D" + MdbId.idExplained( domainId ) + ", event:" + "tx"
+						+ ", key: " + txo.value + ", fcur: " + fcur + ( fcur == 0 ? ", fmax: " + fmax : "" ) 
+						+ ", tx64len: " + tx64len + ", chunkSz: " + chunkSz + ", httpcode: " + hr.getResponseCode();
+				context.addLog( msg, ( System.currentTimeMillis() - dt ) );
+				if( context.isGaeSdk() ) System.out.println( msg + ", data: " + json.toString() );
+				
+				// stop if rc != 202
+				if( hr.getResponseCode() != 202 )
+					return false;
+				
+			} catch (JSONException e) {
+				context.addRcLog(RLE.ERR_INTERNAL, e.toString() );
+				return false;
+			}
+			
+			// increment fcur
+			fcur++;
+		}
+		
+		dt = System.currentTimeMillis() - dt;
+		
+		return true;
 	}
 	
 	/** Create a transaction domain for new created domain (TRANS-OPEN, EVENT(INSERT(new domain)), TRANS-CLOSE).
